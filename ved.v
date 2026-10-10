@@ -215,6 +215,7 @@ fn main() {
 		keydown_fn:    key_down
 		char_fn:       on_char
 		font_path:     fpath
+		icon:          app_icon()
 		ui_mode:       true
 	)
 	ved.win_width = win_width
