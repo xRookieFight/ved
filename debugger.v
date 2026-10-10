@@ -258,10 +258,10 @@ fn (mut ved Ved) draw_debugger_variables() {
 	split_from, split_to := ved.get_splits_from_to()
 	split_width := ved.split_width()
 	// We draw debugger variables in the last split (the one with the output)
-	last_split_x := split_width * (split_to - 1 - split_from)
+	last_split_x := ved.split_x(split_to - 1 - split_from)
 	// println('split_width=${split_width}, last_split_x=${last_split_x}')
 	// println('DRAW D VARS x=${last_split_x} splitw=${split_width}, to=${split_to}, from=${split_from}')
-	ved.gg.draw_rect_filled(last_split_x, ved.cfg.line_height, split_width, 500, ved.cfg.title_color)
+	ved.gg.draw_rect_filled(last_split_x, ved.text_top(), split_width, 500, ved.cfg.title_color)
 	if ved.debugger.output.vars.len == 0 {
 		return
 	}
@@ -280,7 +280,7 @@ fn (mut ved Ved) draw_debugger_variables() {
 	col_width := (max_name_len + 1) * ved.cfg.char_width
 	// Draw the table
 	for i, var in ved.debugger.output.vars {
-		y := (i + 1) * ved.cfg.line_height + 3
+		y := ved.text_top() + i * ved.cfg.line_height + 3
 		// col_width := 80
 		ved.gg.draw_text(x, y, var.name.limit(max_name_len),
 			color: debugger_name_color

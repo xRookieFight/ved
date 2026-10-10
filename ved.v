@@ -43,11 +43,7 @@ mut:
 	cur_split          int
 	view               &View = unsafe { nil }
 	mode               EditorMode
-	just_switched      bool // for keydown/char events to avoid dup keys
-	prev_key           gg.KeyCode
-	prev_key_str       string // for `ci(` etc, no `(` in gg.KeyCode
-	prev_cmd           string
-	prev_insert        string        // for `.` (re-enter the text that was just entered via cw etc)
+	just_switched      bool          // for keydown/char events to avoid dup keys
 	all_git_files      []string      // Files for the *current* workspace only
 	all_files_partial  bool          // the walk for all_git_files stopped at max_walked_entries
 	ctrlp_partial      bool          // the current Ctrl+P search saw a partial file list
@@ -60,8 +56,7 @@ mut:
 	workspace          string // full path of the current workspace (a short version of it is rendered on otp right)
 	workspace_idx      int
 	workspaces         []string
-	ylines             []string // for y, yy
-	git_diff_plus      string   // short git diff stat top right
+	git_diff_plus      string // short git diff stat top right
 	git_diff_minus     string
 	syntaxes           []Syntax
 	current_syntax_idx int
@@ -81,9 +76,10 @@ mut:
 	gg_scroll          int // scroll offset for grep/ctrlp results
 	cfg                Config
 	cb                 &clipboard.Clipboard = unsafe { nil }
-	open_paths         [][]string // all open files (tabs) per workspace: open_paths[workspace_idx] == ['a.txt', b.v']
-	prev_y             int        // for jumping back ('')
-	now                time.Time  // cached value of time.now() to avoid calling it for every frame
+	open_paths         [][]string        // all open files (tabs) per workspace, full paths: open_paths[workspace_idx] == ['/code/a.txt', '/code/b.v']
+	stash              map[string]Buffer // unsaved edits of files that are open in a tab but not in a split
+	prev_y             int               // for jumping back ('')
+	now                time.Time         // cached value of time.now() to avoid calling it for every frame
 	search_history     []string
 	search_idx         int
 	cq_in_a_row        int
@@ -97,7 +93,42 @@ mut:
 	cur_fn_name        string              // Always displayed on the top bar
 	grep_file_exts     map[string][]string // m['workspace_path'] == ['v', 'go']
 	// debugger_output      DebuggerOutput
-	tree Tree // for rendering file tree on the left
+	tree          Tree      // for rendering file tree on the left
+	tab_rects     []TabRect // filled while drawing the tab bar, used for mouse hit tests
+	dragging      bool      // left mouse button is held down inside the text area
+	last_click_ms i64       // for double click word selection
+	last_click_x  int
+	last_click_y  int
+	mouse_x       int
+	mouse_y       int
+	// menu bar
+	menus           []Menu
+	menu_open       int = -1 // index of the open dropdown, branch_popup for the branch widget
+	menu_sel        int = -1 // keyboard selection inside the dropdown
+	branch_widget_x int
+	branch_widget_w int
+	branch_items    []MenuItem
+	// git
+	git              GitStatus
+	git_kinds        map[string]GitKind // full path => status
+	git_dirs         map[string]bool    // folders containing changes, colored in the tree
+	git_sig          string
+	git_busy         bool
+	git_last_refresh i64
+	git_ch           chan GitStatus
+	lines_ch         chan LineChanges
+	note_ch          chan Note
+	notes            []Note
+	// left panel and commit tool window
+	left_panel       LeftPanel
+	panel_hits       []Hit
+	commit_msg       string
+	commit_focus     bool
+	commit_amend     bool
+	commit_excluded  map[string]bool // changed files unchecked in the commit window
+	commit_scroll    int
+	last_panel_click i64
+	last_panel_idx   int
 }
 
 // Workspace holds configuration loaded from a workspace/path/.ved json file
@@ -106,16 +137,14 @@ struct Workspace {
 	// path string
 }
 
-// EditorMode defines the different modes the editor can be in, similar to Vim.
+// EditorMode is what currently gets the keyboard. Text editing itself is modeless,
+// the other modes are popups or tool windows sitting on top of the editor.
 enum EditorMode {
-	normal       = 0
-	insert       = 1
-	query        = 2
-	visual       = 3
-	timer        = 4
-	autocomplete = 5
-	debugger     = 6
-	visual_block = 7 // cmd+v
+	edit
+	query
+	timer
+	autocomplete
+	debugger
 }
 
 // ViSize represents the dimensions (width and height) of a view or the window.
@@ -175,9 +204,13 @@ fn main() {
 		// nr_splits: nr_splits
 		// nr_splits: nr_splits
 		cur_split:  0
-		mode:       .normal
+		mode:       .edit
 		cb:         clipboard.new()
 		open_paths: [][]string{len: max_nr_workspaces}
+		menus:      build_menus()
+		git_ch:     chan GitStatus{cap: 4}
+		lines_ch:   chan LineChanges{cap: 16}
+		note_ch:    chan Note{cap: 16}
 	}
 	ved.handle_segfault()
 
@@ -283,7 +316,6 @@ fn main() {
 	}
 	ved.load_timer()
 	ved.load_file_stats()
-	ved.init_tree()
 	println('first_launch=${first_launch}')
 	if ved.workspaces.len == 1 && first_launch && !os.exists(session_path) {
 		ved.view.open_file(os.join_path(exe_dir, 'welcome.txt'), 0)
@@ -294,10 +326,12 @@ fn main() {
 }
 
 // split_width calculates and returns the width of a single editor split.
+// The file tree panel on the left is not part of the editor area.
 fn (ved &Ved) split_width() int {
-	mut split_width := ved.win_width / ved.nr_splits // + 60
+	editor_width := ved.win_width - ved.tree_width()
+	mut split_width := editor_width / ved.nr_splits // + 60
 	if split_width < 300 {
-		split_width = ved.win_width
+		split_width = editor_width
 	}
 	return split_width
 }
@@ -308,6 +342,8 @@ fn frame(mut ved Ved) {
 	// return
 	// }
 	// println('frame() ${time.now()}')
+	ved.sync_window_size()
+	ved.poll_git()
 	ved.gg.begin()
 	ved.draw()
 	if ved.mode == .timer {
@@ -334,6 +370,9 @@ fn (ved &Ved) git_commit() {
 // ctrl_n provides basic word completion by finding the next word in the current buffer that starts with the word under the cursor.
 fn (mut ved Ved) ctrl_n() {
 	line := ved.view.line()
+	if ved.view.x == 0 || ved.view.x > line.len {
+		return
+	}
 	mut i := ved.view.x - 1
 	end := i
 	for i > 0 && is_alpha_underscore(int(line[i])) {
@@ -352,36 +391,31 @@ fn (mut ved Ved) ctrl_n() {
 		// If any word starts with our subword, add the rest
 		if map_word.starts_with(word) {
 			ved.view.insert_text(map_word[word.len..])
-			ved.just_switched = true
 			return
 		}
 	}
 }
 
 // word_under_cursor finds and returns the complete word currently under the text cursor.
+// The caret right after a word counts too, since in a modeless editor x can sit at the line end.
 fn (ved &Ved) word_under_cursor() string {
 	line := ved.view.line()
-	// First go left
-	mut start := ved.view.x
-	if start > 0 && line.len > 0 && !is_alpha_underscore(int(line[start - 1])) {
-		return ''
-	}
-	for start > 0 && is_alpha_underscore(int(line[start])) {
+	mut start := if ved.view.x > line.len { line.len } else { ved.view.x }
+	if (start == line.len || !is_alpha_underscore(int(line[start]))) && start > 0
+		&& is_alpha_underscore(int(line[start - 1])) {
 		start--
 	}
-	// Now go right
-	mut end := ved.view.x
+	if start >= line.len || !is_alpha_underscore(int(line[start])) {
+		return ''
+	}
+	mut end := start
+	for start > 0 && is_alpha_underscore(int(line[start - 1])) {
+		start--
+	}
 	for end < line.len && is_alpha_underscore(int(line[end])) {
 		end++
 	}
-	if start + 1 >= line.len || start >= end {
-		return ''
-	}
-	// println("word under cursor line='$line' start=$start end=$end")
-	// print_backtrace()
-	mut word := line[start + 1..end]
-	word = word.trim_space()
-	return word
+	return line[start..end]
 }
 
 // word_under_cursor_no_right finds and returns the word from the start of the word to the cursor position. Used for autocompletion triggers.
@@ -400,14 +434,14 @@ fn (ved &Ved) word_under_cursor_no_right() string {
 	return word
 }
 
-// star implements the '*' key functionality from Vim: search for the word under the cursor.
+// star searches for the next occurrence of the word under the cursor (Ctrl+F3).
 fn (mut ved Ved) star() {
 	ved.search_query = ved.word_under_cursor()
 	ved.search(.forward)
 }
 
 // switch between { and } etc
-// pct implements the '%' key functionality from Vim: jump to the matching bracket, brace, or parenthesis.
+// pct jumps to the matching bracket, brace, or parenthesis (Ctrl+Shift+M).
 fn (mut ved Ved) pct() {
 	mut line := ved.view.line()
 	if ved.view.x >= line.len {
@@ -498,59 +532,6 @@ fn (mut ved Ved) update_view() {
 	}
 }
 
-// set_insert switches the editor to Insert mode.
-fn (mut ved Ved) set_insert() {
-	ved.mode = .insert
-	ved.prev_insert = ''
-	ved.just_switched = true
-}
-
-// exit_visual switches the editor from Visual mode back to Normal mode and clears the selection.
-fn (mut ved Ved) exit_visual() {
-	println('exit visual')
-	ved.mode = .normal
-	mut view := ved.view
-	view.vstart = -1
-	view.vend = -1
-}
-
-// dot implements the '.' key functionality from Vim: repeat the last change command.
-fn (mut ved Ved) dot() {
-	prev_cmd := ved.prev_cmd
-	match prev_cmd {
-		'dd' {
-			ved.view.dd()
-		}
-		'dw' {
-			ved.view.dw(true)
-		}
-		'cw' {
-			ved.view.dw(false)
-			// println('dot cw prev_insert=$ved.prev_insert')
-			ved.view.insert_text(ved.prev_insert)
-			ved.prev_cmd = 'cw'
-		}
-		'de' {
-			ved.view.de()
-		}
-		'J' {
-			ved.view.join()
-		}
-		'I' {
-			ved.view.shift_i()
-			ved.view.insert_text(ved.prev_insert)
-		}
-		'A' {
-			ved.view.shift_a()
-			ved.view.insert_text(ved.prev_insert)
-		}
-		'r' {
-			ved.view.r(ved.prev_insert)
-		}
-		else {}
-	}
-}
-
 // next_split switches focus to the next split.
 fn (mut ved Ved) next_split() {
 	ved.cur_split++
@@ -594,6 +575,7 @@ fn (mut ved Ved) open_workspace(idx int) {
 
 	// Load git files for the new workspace
 	ved.load_git_tree()
+	ved.init_tree()
 
 	for i, view in ved.views {
 		// Maybe the file is not loaded correctly (can happen on ved's launch)
@@ -1027,7 +1009,7 @@ fn (ved &Ved) task_minutes() int {
 // git_pull performs a `git pull --rebase` in the current workspace directory.
 fn (mut ved Ved) git_pull() {
 	os.system_args(['git', '-C', ved.workspace, 'pull', '--rebase'])
-	ved.mode = .normal
+	ved.mode = .edit
 	ved.gg.refresh_ui()
 }
 
@@ -1069,6 +1051,10 @@ fn (mut ved Ved) increase_font(delta int) {
 	}
 	ved.cfg.line_nr_cfg = gg.TextCfg{
 		...ved.cfg.line_nr_cfg
+		size: ved.cfg.text_size
+	}
+	ved.cfg.dim_cfg = gg.TextCfg{
+		...ved.cfg.dim_cfg
 		size: ved.cfg.text_size
 	}
 	ved.cfg.string_cfg = gg.TextCfg{

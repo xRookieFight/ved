@@ -6,20 +6,14 @@ module main
 import strings
 
 // Fit lines  into 80 chars
-// gq reflows (formats) the visually selected paragraph to a fixed width. (Vim: `gq`)
+// gq reflows (formats) the selected lines to a fixed width (Alt+Q).
 fn (mut view View) gq() {
-	mut ved := view.ved
-	if ved.mode != .visual {
+	if !view.has_sel() {
 		return
 	}
-
-	vtop, vbot := if view.vstart < view.vend {
-		view.vstart, view.vend
-	} else {
-		view.vend, view.vstart
-	}
+	vtop, vbot := view.sel_line_range()
+	view.clear_sel()
 	if vtop < 0 || vbot < 0 || vtop >= view.lines.len || vbot >= view.lines.len {
-		ved.exit_visual()
 		return
 	}
 
@@ -29,7 +23,6 @@ fn (mut view View) gq() {
 	}
 
 	if selected_lines.len == 0 {
-		ved.exit_visual()
 		return
 	}
 
@@ -97,10 +90,9 @@ fn (mut view View) gq() {
 		insert_pos++
 	}
 
-	// Reset cursor and mode.
+	// Reset cursor.
 	view.set_y(vtop)
 	view.x = indent_str.runes().len
-	ved.exit_visual()
 	view.changed = true
 }
 

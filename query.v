@@ -25,6 +25,10 @@ enum QueryType {
 	run              = 8
 	alert            = 9 // e.g. "running git pull..."
 	search_in_folder = 10
+	goto_line        = 11
+	new_file         = 12
+	new_branch       = 13
+	confirm_rollback = 14
 }
 
 fn (mut ved Ved) key_query(key gg.KeyCode, super bool) {
@@ -77,6 +81,26 @@ fn (mut ved Ved) key_query(key gg.KeyCode, super bool) {
 				.run {
 					ved.run_zsh()
 				}
+				.new_file {
+					ved.create_file(ved.query.trim_space())
+				}
+				.new_branch {
+					name := ved.query.trim_space()
+					if name != '' {
+						ved.git_checkout(['-b', name])
+					}
+				}
+				.confirm_rollback {
+					ved.git_rollback(ved.view.path)
+				}
+				.goto_line {
+					line_nr := ved.query.int()
+					if line_nr > 0 {
+						ved.view.clear_sel()
+						ved.move_to_line(int_min(line_nr, ved.view.lines.len) - 1)
+						ved.view.zz()
+					}
+				}
 				.grep {
 					// Key down was pressed after typing, now pressing enter opens the file
 					if ved.gg_pos > -1 && ved.gg_lines.len > 0 && ved.gg_pos < ved.gg_lines.len {
@@ -89,7 +113,7 @@ fn (mut ved Ved) key_query(key gg.KeyCode, super bool) {
 						ved.view.open_file(ved.workspace + '/' + path, line_nr)
 						// ved.view.move_to_line(line_nr)
 						ved.view.zz()
-						ved.mode = .normal
+						ved.mode = .edit
 					} else {
 						// Otherwise just do a git grep on a submitted query
 						ved.git_grep()
@@ -101,11 +125,11 @@ fn (mut ved Ved) key_query(key gg.KeyCode, super bool) {
 					ved.search(.forward)
 				}
 			}
-			ved.mode = .normal
+			ved.mode = .edit
 			return
 		}
 		.escape {
-			ved.mode = .normal
+			ved.mode = .edit
 			return
 		}
 		.down {
@@ -336,10 +360,15 @@ fn (q QueryType) str() string {
 		.grep { 'git grep' }
 		.run { 'run a zsh command' }
 		.alert { '' }
+		.goto_line { 'go to line' }
+		.new_file { 'new file (path relative to the workspace)' }
+		.new_branch { 'new branch name' }
+		.confirm_rollback { 'roll back all changes in this file? enter to confirm, esc to cancel' }
 	}
 }
 
-const small_queries = [QueryType.search, .cam, .open, .run, .alert] //.grep
+const small_queries = [QueryType.search, .cam, .open, .run, .alert, .goto_line, .new_file, .new_branch,
+	.confirm_rollback] //.grep
 
 const max_grep_lines = 20
 const query_width = 700
@@ -426,7 +455,8 @@ fn (mut ved Ved) draw_query() {
 		)
 	}
 	// Draw separator between query and files
-	if ved.query_type !in [.search, .cam, .run, .alert] { // Exclude alert too
+	if ved.query_type !in [.search, .cam, .run, .alert, .goto_line, .new_file, .new_branch,
+		.confirm_rollback] { // Exclude alert too
 		ved.gg.draw_rect(
 			x:     x
 			y:     y + ved.cfg.line_height * 2
@@ -606,13 +636,8 @@ fn (mut ved Ved) ctrlj_open() {
 		return
 	}
 
-	// Construct full path (assuming ctrlj shows files relative to current workspace)
-	mut space := ved.workspace
-	if space == '' {
-		space = '.'
-	}
-	full_path := os.join_path(space, selected_relative_path)
-	ved.view.open_file(full_path, 0)
+	// open_paths holds full paths
+	ved.view.open_file(selected_relative_path, 0)
 
 	// Reset state
 	ved.gg_pos = -1
@@ -712,7 +737,7 @@ fn (mut ved Ved) search(search_type SearchType) {
 			} else {
 				ved.move_to_line(i)
 			}
-			view.x = pos
+			view.select_match(pos, ved.search_query)
 			ved.add_to_search_history() // Add to history upon successful find
 			return
 		}
@@ -739,7 +764,7 @@ fn (mut ved Ved) search(search_type SearchType) {
 			} else {
 				ved.move_to_line(i)
 			}
-			view.x = pos
+			view.select_match(pos, ved.search_query)
 			ved.add_to_search_history() // Add to history upon successful find
 			return
 		}
@@ -801,4 +826,34 @@ fn (ved &Ved) load_all_tasks() {
         }
         println(ved.top_tasks)
         */
+}
+
+// select_match selects a search hit, pos is a byte offset in the current line.
+fn (mut view View) select_match(pos int, query string) {
+	line := view.line()
+	view.sel_y = view.y
+	view.sel_x = line[..pos].runes().len
+	view.x = view.sel_x + query.runes().len
+	view.want_col = -1
+}
+
+// create_file makes a new file (and its folders) inside the workspace and opens it.
+fn (mut ved Ved) create_file(rel string) {
+	if rel == '' {
+		return
+	}
+	path := if os.is_abs_path(rel) { rel } else { os.join_path(ved.workspace, rel) }
+	if !os.exists(path) {
+		os.mkdir_all(os.dir(path)) or {
+			ved.notify('cannot create ${os.dir(path)}: ${err.msg()}', true)
+			return
+		}
+		os.write_file(path, '') or {
+			ved.notify('cannot create ${path}: ${err.msg()}', true)
+			return
+		}
+	}
+	ved.open_tab(path)
+	ved.tree.reload()
+	ved.refresh_git()
 }

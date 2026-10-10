@@ -75,7 +75,7 @@ Discord (primary community): https://discord.gg/vlang. Join the `#ved` channel.
 - Small size (~ 1 MB binary, builds in <1s)
 - Hardware accelerated text rendering
 - High performance (scrolling through 300k lines with syntax highlighting without any lag)
-- WIP Vim mode
+- IDE style editing: file tree, tabs, mouse selection, undo/redo
 - Easy integration with any compiler/build system
 - Go to definition
 - Fuzzy file finder
@@ -89,7 +89,6 @@ Discord (primary community): https://discord.gg/vlang. Join the `#ved` channel.
 
 ### Planned features
 
-- True vim mode (current implementation only implements a small subset of vim's features)
 - Emacs keybindings
 - Nano keybindings
 - Word wrap
@@ -153,59 +152,81 @@ To open multiple workspaces, run
 
 `ved path/to/project1 path/to/project2`
 
-Key bindings:
+Key bindings follow IntelliJ's default keymap.
+`C` is `⌘` on macOS, `Ctrl` on all other systems, `S` is Shift and `A` is Alt.
 
-`C` is `⌘` on macOS, `Ctrl` on all other systems.
-
-```
-C q q  exit the editor
-C o    open a file
-C s    save
-C r    reload current file
-C p    open ctrlp (fuzzy search)
-/      search in current file
-C g    copy current file's path to clipboard
-t      go to the previous file
-gd     go to definition
-
-C c    git commit -am
-C -    git diff
-?      git grep (search across all files in current workspace)
-
-C u    build current project (build instructions must be located in "build")
-C y    alternative build of the current project (build instructions must be located in "build2")
-C 1    switch to Ved from any other application (only on macOS for now)
-
-C d    go to the previous split
-C e    go to the next split
-C [    go to the previous workspace
-C ]    go to the next workspace
-
-C a    start a new task
-C t    show the Timer/Pomodoro window
-
+Editing works like in any IDE: just type. The menu bar on top has every
+command, Alt plus the first letter of a menu opens it (A f for File). Hold Shift with the movement keys
+or drag with the mouse to select. Click files in the tree on the left to open
+them, they show up as tabs on top.
 
 ```
+Editing:
 
-Supported vim bindings:
-```
-j k h l         down, up, left, right (moves cursor)
-C-F C-B         page down, page up
-L H             go to top/bottom of the page
-w b             next/previous word
-dw de cw ce     delete word
-di ci           smart delete
-A I             go to start/end of line, insert mode
-o O             new line below/above, insert mode
-v               selection mode
-zz              center current line
-y d p J         yank, delete, paste, join lines
-.               repeat last action
-< >             indent right/left
-/ * n           search, search for word under cursor, next occurence
-gg G            go to the beginning/end of the file
-x r             delete/replace character under cursor
-C-n             autocomplete
-+y              yank and copy to system clipboard
+C s            save (unsaved files in other tabs too)
+C z  C S z     undo, redo
+C c  C x  C v  copy, cut, paste (the whole line when nothing is selected)
+C a            select all
+C d            duplicate line or selection
+C y            delete line
+C /            comment/uncomment lines
+C S j          join lines
+S Enter        new line below
+C A Enter      new line above
+Tab  S Tab     indent, unindent selected lines
+A q            reflow selected lines to 80 columns
+C Space        complete the word from words in the file
+
+Navigation:
+
+C Left/Right   previous/next word
+Home  End      start/end of line
+C Home/End     start/end of file
+C g            go to line
+C b            go to definition (or C click)
+C S m          go to matching bracket
+C e            go to the previously opened file
+A Left/Right   previous/next tab (also C Tab, C S Tab)
+C w            close tab (also C F4, middle click)
+A 1            show/hide the file tree
+A S Left/Right previous/next split
+C [  C ]       previous/next workspace
+
+Search:
+
+C f            find in file (F3, S F3 for next/previous)
+C F3           find the word under the cursor
+C S f          find in workspace (git grep)
+C A f          find in the current file's folder
+C p  C S n     go to file (fuzzy search)
+C o            open a file by path
+C S o          open a workspace
+
+Git (also in the Git menu, the branch widget on the top right switches branches):
+
+C k            commit: opens the Commit panel, C Enter commits, C A Enter commits and pushes
+C S k          push
+C S p          update project (git pull --rebase)
+C S d          show diff of the current file
+C A z          roll back the current file
+A 0            show/hide the Commit panel
+A 9            show the git log
+C -  C A d     git diff of the workspace
+
+Tools:
+
+C u  C F9      build current project (build instructions must be located in "build")
+C S F9         alternative build (instructions in "build2")
+F5  S F10      run current file
+C S r  A F12   run a shell command
+C F8           toggle breakpoint
+S F9  C S u    start the debugger, F8 steps over
+C r            reload current file from disk
+C S c          copy current file's path to clipboard
+C S =  C S -   bigger/smaller font
+C Enter  F11   toggle fullscreen
+C 0            start a new task
+C t            show the Timer/Pomodoro window
+C q q          exit the editor
 ```
 

@@ -3,175 +3,159 @@ module main
 import gg
 import os
 
+// Layout: file tree on the left, tab bar on top of the editor area,
+// status bar at the very bottom, and the splits fill the rest.
+fn (ved &Ved) tree_width() int {
+	if !ved.cfg.show_file_tree {
+		return 0
+	}
+	mut w := ved.cfg.tree_width
+	if w > ved.win_width / 3 {
+		w = ved.win_width / 3
+	}
+	return w
+}
+
+fn (ved &Ved) tab_bar_height() int {
+	return ved.cfg.line_height + 12
+}
+
+fn (ved &Ved) status_bar_height() int {
+	return ved.cfg.line_height + 6
+}
+
+// content_top is where everything below the menu bar starts.
+fn (ved &Ved) content_top() int {
+	return ved.menu_bar_height() + 1
+}
+
+fn (ved &Ved) tab_bar_bottom() int {
+	return ved.content_top() + ved.tab_bar_height()
+}
+
+// text_top is the y of the first text line.
+fn (ved &Ved) text_top() int {
+	return ved.tab_bar_bottom() + 4
+}
+
 fn (mut ved Ved) draw() {
 	mut view := ved.view
 	split_width := ved.split_width()
-	ved.page_height = ved.win_height / ved.cfg.line_height - 1
-	view.page_height = ved.page_height
-	// Splits from and to
+	ved.page_height = (ved.win_height - ved.text_top() - ved.status_bar_height()) / ved.cfg.line_height
+	if ved.page_height < 1 {
+		ved.page_height = 1
+	}
 	from, to := ved.get_splits_from_to()
-	// Not a full refresh? Means we need to refresh only current split.
-	if !ved.refresh {
-		// split_x := split_width * (ved.cur_split - from)
-		// ved.gg.draw_rect_filled(split_x, 0, split_width - 1, ved.win_height, ved.cfg.bgcolor)
+	for i := from; i < to && i < ved.views.len; i++ {
+		ved.views[i].page_height = ved.page_height
 	}
-	// Coords
+	// Current line
 	y := ved.calc_cursor_y()
-	// Cur line
-	line_x := split_width * (ved.cur_split - from) + ved.view.padding_left + 10
-	line_width := split_width - ved.view.padding_left - 10
-	ved.gg.draw_rect_filled(line_x, y, line_width, ved.cfg.line_height, ved.cfg.vcolor)
-	// V selection
-	if ved.mode == .visual {
-		mut v_from := ved.view.vstart + 1
-		mut v_to := ved.view.vend + 1
-		if view.vend < view.vstart {
-			// Swap start and end if we go beyond the start
-			v_from = ved.view.vend + 1
-			v_to = ved.view.vstart + 1
-		}
-		for yy := v_from; yy <= v_to; yy++ {
-			ved.gg.draw_rect_filled(line_x, (yy - ved.view.from) * ved.cfg.line_height,
-				line_width, ved.cfg.line_height, ved.cfg.vcolor)
-		}
-	} else if ved.mode == .visual_block {
-		mut v_from := ved.view.vstart
-		mut v_to := ved.view.vend
-		if v_to < v_from {
-			v_from, v_to = v_to, v_from
-		}
-		x_min := if ved.view.vx < ved.view.x { ved.view.vx } else { ved.view.x }
-		x_max := if ved.view.vx > ved.view.x { ved.view.vx } else { ved.view.x }
-		for yy := v_from; yy <= v_to; yy++ {
-			if yy < ved.view.from || yy >= ved.view.from + ved.page_height {
-				continue
-			}
-			// line := view.lines[yy]
-			// TODO handle tabs
-			start_off := x_min * ved.cfg.char_width
-			width := (x_max - x_min + 1) * ved.cfg.char_width
-			y_pos := (yy - ved.view.from) * ved.cfg.line_height + ved.cfg.line_height
-			ved.gg.draw_rect_filled(line_x + start_off, y_pos, width, ved.cfg.line_height,
-				ved.cfg.vcolor)
-		}
-	}
-	// Black title background
-	ved.gg.draw_rect_filled(0, 0, ved.win_width, ved.cfg.line_height, ved.cfg.title_color)
-	// Current split has dark blue title
-	// ved.gg.draw_rect_filled(split_x, 0, split_width, ved.cfg.line_height, gx.rgb(47, 11, 105))
-	// Title (file paths)
-	for i := to - 1; i >= from; i-- {
-		v := ved.views[i]
-		mut name := v.short_path
-		if v.changed && !v.path.ends_with('/out') {
-			name = '${name} [+]'
-		}
-		ved.gg.draw_text(ved.split_x(i - from) + v.padding_left + 10, 1, name, ved.cfg.file_name_cfg)
-	}
-	// Git diff stats
-	if ved.git_diff_plus != '+' {
-		ved.gg.draw_text(ved.win_width - 400, 1, ved.git_diff_plus, ved.cfg.plus_cfg)
-	}
-	if ved.git_diff_minus != '-' {
-		ved.gg.draw_text(ved.win_width - 350, 1, ved.git_diff_minus, ved.cfg.minus_cfg)
-	}
-	// Workspaces
-	nr_spaces := ved.workspaces.len
-	cur_space := ved.workspace_idx + 1
-	space_name := short_space(ved.workspace)
-	ved.gg.draw_text(ved.win_width - 220, 1, '[${space_name}]', ved.cfg.file_name_cfg)
-	ved.gg.draw_text(ved.win_width - 100, 1, '${cur_space}/${nr_spaces}', ved.cfg.file_name_cfg)
-	// Time
-	ved.gg.draw_text(ved.win_width - 50, 1, ved.now.hhmm(), ved.cfg.file_name_cfg)
-	// ved.gg.draw_text(ved.win_width - 550, 1, now.hhmmss(), file_name_cfg)
-	// vim top right next to current time
-	/*
-	if ved.start_unix > 0 {
-		minutes := '1m' //ved.timer.minutes()
-		ved.gg.draw_text(ved.win_width - 300, 1, '${minutes}m' !,
-			ved.cfg.file_name_cfg)
-	}
-	*/
-	if ved.cur_task != '' {
-		// Draw current task
-		task_text_width := ved.cur_task.len * ved.cfg.char_width
-		task_x := ved.win_width - split_width - task_text_width - 70
-		// ved.timer.gg.draw_text(task_x, 1, ved.timer.cur_task.to_upper(), file_name_cfg)
-		ved.gg.draw_text(task_x, 1, ved.cur_task, ved.cfg.file_name_cfg)
-		// Draw current task time
-		task_time_x := (ved.nr_splits - 1) * split_width - 50
-		ved.gg.draw_text(task_time_x, 1, '${ved.task_minutes()}m', ved.cfg.file_name_cfg)
-	}
-	// Draw pomodoro timer
-	if ved.timer.pom_is_started {
-		ved.gg.draw_text(split_width - 50, 1, '${ved.pomodoro_minutes()}m', ved.cfg.file_name_cfg)
-	}
-	// Draw "i" in insert mode
-	if ved.mode == .insert {
-		ved.gg.draw_text(5, 1, '-i-', ved.cfg.file_name_cfg)
-	}
-	// Draw "v" in visual mode
-	if ved.mode == .visual {
-		ved.gg.draw_text(5, 1, '-v-', ved.cfg.file_name_cfg)
+	cursor_visible := view.y >= view.from && view.y < view.from + ved.page_height
+	line_x := ved.split_x(ved.cur_split - from) + view.padding_left + 10
+	line_width := split_width - view.padding_left - 10
+	if cursor_visible && !view.has_sel() {
+		ved.gg.draw_rect_filled(line_x, y, line_width, ved.cfg.line_height, ved.cfg.vcolor)
 	}
 	// Splits
-	// println('\nsplit from=$from to=$to nrviews=$ved.views.len refresh=$ved.refresh')
 	for i := to - 1; i >= from; i-- {
-		// J or K is pressed (full refresh disabled for performance), only redraw current split
-		if !ved.refresh && i != ved.cur_split {
-			// continue
-		}
-		// t := glfw.get_time()
 		ved.draw_split(i, from)
-		// println('draw split $i: ${ glfw.get_time() - t }')
-	}
-	// Cur fn name (top right of current split)
-	if view.y != view.from { // Don't draw current fn name if the first visible line is selected
-		cur_fn_width := ved.cfg.char_width * ved.cur_fn_name.len
-		cur_fn_x := (ved.cur_split % ved.nr_splits + 1) * split_width - cur_fn_width - 3
-		cur_fn_y := ved.cfg.line_height
-		ved.gg.draw_rect(
-			x:     cur_fn_x
-			y:     cur_fn_y
-			w:     cur_fn_width
-			h:     ved.cfg.line_height
-			color: ved.cfg.bgcolor // gx.rgb(40, 40, 40)
-		)
-		ved.gg.draw_text(cur_fn_x, cur_fn_y, ved.cur_fn_name, ved.cfg.comment_cfg)
 	}
 	// Debugger variables
 	if ved.mode == .debugger && ved.debugger.output.vars.len > 0 {
 		ved.draw_debugger_variables()
 	}
-	// Cursor
-	mut cursor_x := ved.calc_cursor_x()
-	ved.draw_cursor(cursor_x, y)
-
-	// ved.gg.draw_text_def(cursor_x + 500, y - 1, 'tab=$cursor_tab_off x=$cursor_x view_x=$ved.view.x')
-	// query window
+	if cursor_visible {
+		ved.draw_cursor(ved.calc_cursor_x(), y)
+	}
+	if ved.cfg.show_file_tree {
+		ved.draw_left_panel()
+	}
+	ved.draw_tab_bar()
+	ved.draw_status_bar()
+	ved.draw_menu_bar()
 	if ved.mode == .query {
 		ved.draw_query()
 	} else if ved.mode == .autocomplete {
 		ved.draw_autocomplete_window()
 	}
+	ved.draw_notes()
+	ved.draw_dropdown()
+}
+
+// draw_notes draws the notification balloons in the bottom right corner.
+fn (mut ved Ved) draw_notes() {
+	mut y := ved.win_height - ved.status_bar_height() - 12
+	cw := ved.cfg.char_width
+	for i := ved.notes.len - 1; i >= 0; i-- {
+		note := ved.notes[i]
+		w := int_min(note.text.runes().len * cw + 36, ved.win_width - 24)
+		h := ved.cfg.line_height + 18
+		y -= h
+		x := ved.win_width - w - 12
+		ved.gg.draw_rounded_rect_filled(x + 2, y + 3, w, h, 6, gg.rgba(0, 0, 0, 60))
+		ved.gg.draw_rounded_rect_filled(x - 1, y - 1, w + 2, h + 2, 6, ved.cfg.split_color)
+		ved.gg.draw_rounded_rect_filled(x, y, w, h, 6, ved.cfg.popup_bgcolor)
+		dot := if note.is_error { gg.rgb(220, 80, 80) } else { ved.cfg.git_added_color }
+		ved.gg.draw_circle_filled(x + 14, y + h / 2, 4, dot)
+		max_chars := (w - 36) / cw
+		text := if note.text.runes().len > max_chars {
+			note.text.runes()[..max_chars - 1].string() + '…'
+		} else {
+			note.text
+		}
+		ved.gg.draw_text(x + 26, y + 9, text, ved.cfg.txt_cfg)
+		y -= 8
+	}
+}
+
+fn (mut ved Ved) draw_status_bar() {
+	h := ved.status_bar_height()
+	y := ved.win_height - h
+	text_y := y + (h - ved.cfg.line_height) / 2
 	// Big red error line at the bottom
 	if ved.error_line != '' {
-		ved.gg.draw_rect_filled(0, ved.win_height - ved.cfg.line_height, ved.win_width,
-			ved.cfg.line_height, ved.cfg.errorbgcolor)
-		ved.gg.draw_text(3, ved.win_height - ved.cfg.line_height, ved.error_line, gg.TextCfg{
+		ved.gg.draw_rect_filled(0, y, ved.win_width, h, ved.cfg.errorbgcolor)
+		ved.gg.draw_text(8, text_y, ved.error_line, gg.TextCfg{
 			size:  ved.cfg.text_size
 			color: gg.white
 			align: gg.align_left
 		})
+		return
 	}
-	if ved.cfg.show_file_tree {
-		// Draw file tree
-		ved.tree.draw(mut ved)
+	ved.gg.draw_rect_filled(0, y, ved.win_width, h, ved.cfg.panel_color)
+	ved.gg.draw_line(0, y, ved.win_width, y, ved.cfg.split_color)
+	view := ved.view
+	mut left := view.short_path
+	if ved.cur_fn_name != '' {
+		left += '  >  ${ved.cur_fn_name}'
 	}
+	if ved.cur_task != '' {
+		left += '    ${ved.cur_task} ${ved.task_minutes()}m'
+	}
+	if ved.timer.pom_is_started {
+		left += '    pomodoro ${ved.pomodoro_minutes()}m'
+	}
+	ved.gg.draw_text(8, text_y, left, ved.cfg.dim_cfg)
+	mut right := '${view.y + 1}:${view.x + 1}'
+	if view.has_sel() {
+		y1, x1, y2, x2 := view.sel_bounds()
+		sel_info := if y1 == y2 { '${x2 - x1} chars' } else { '${y2 - y1 + 1} lines' }
+		right = sel_info + '    ' + right
+	}
+	if ved.git_diff_plus !in ['', '+'] {
+		right += '    ${ved.git_diff_plus} ${ved.git_diff_minus}'
+	}
+	right += '    ${short_space(ved.workspace)} ${ved.workspace_idx + 1}/${ved.workspaces.len}'
+	right += '    ${ved.now.hhmm()}'
+	ved.gg.draw_text(ved.win_width - 8, text_y, right, gg.TextCfg{
+		...ved.cfg.dim_cfg
+		align: gg.align_right
+	})
 }
 
 fn (ved &Ved) split_x(i int) int {
-	return ved.split_width() * i
+	return ved.tree_width() + ved.split_width() * i
 }
 
 fn (mut ved Ved) draw_split(i int, split_from int) {
@@ -183,14 +167,20 @@ fn (mut ved Ved) draw_split(i int, split_from int) {
 		current_is_ml_comment = ved.determine_ml_comment_state(view, view.from)
 	}
 	ext := os.file_ext(view.path) // Cache extension
+	is_diff := ext == '.diff'
 	mcomment := get_mcomment_by_ext(ext) // Cache delimiters
 
 	split_width := ved.split_width()
-	split_x := split_width * (i - split_from)
+	split_x := ved.split_x(i - split_from)
 	// Vertical split line
-	ved.gg.draw_line(split_x, ved.cfg.line_height + 1, split_x, ved.win_height, ved.cfg.split_color)
+	if i > split_from {
+		ved.gg.draw_line(split_x, ved.tab_bar_bottom(), split_x, ved.win_height, ved.cfg.split_color)
+	}
+	if view.has_sel() {
+		ved.draw_selection(view, split_x + view.padding_left + 10)
+	}
 	// Lines
-	mut line_nr_rel := 1 // relative y on screen
+	mut line_nr_rel := 0 // relative y on screen
 	for j := view.from; j < view.from + ved.page_height && j < view.lines.len; j++ {
 		line := view.lines[j]
 		if line.len > 5000 {
@@ -198,7 +188,7 @@ fn (mut ved Ved) draw_split(i int, split_from int) {
 			continue
 		}
 		x := split_x + view.padding_left
-		y := line_nr_rel * ved.cfg.line_height
+		y := ved.text_top() + line_nr_rel * ved.cfg.line_height
 		// Error bg
 		if view.error_y == j {
 			ved.gg.draw_rect_filled(x + 10, y - 1, split_width - view.padding_left - 10,
@@ -218,6 +208,21 @@ fn (mut ved Ved) draw_split(i int, split_from int) {
 		// Line number
 		line_number := j + 1
 		ved.gg.draw_text(x + 3, y, '${line_number}', ved.cfg.line_nr_cfg)
+		// Git change marker in the gutter, between the number and the text
+		if mark := view.git_marks[j] {
+			gx := x + 5
+			match mark {
+				`a` {
+					ved.gg.draw_rect_filled(gx, y, 3, ved.cfg.line_height, ved.cfg.git_added_color)
+				}
+				`m` {
+					ved.gg.draw_rect_filled(gx, y, 3, ved.cfg.line_height, ved.cfg.git_modified_color)
+				}
+				else {
+					ved.gg.draw_triangle_filled(gx - 1, y - 4, gx + 5, y, gx - 1, y + 4, ved.cfg.line_nr_color)
+				}
+			}
+		}
 		// Tab offset
 		mut line_x := x + 10
 		mut nr_tabs := 0
@@ -261,7 +266,22 @@ fn (mut ved Ved) draw_split(i int, split_from int) {
 			}
 		}
 
-		if view.hl_on {
+		if is_diff {
+			// unified diff output from the git actions
+			color := if s.starts_with('+') && !s.starts_with('+++') {
+				ved.cfg.git_added_color
+			} else if s.starts_with('-') && !s.starts_with('---') {
+				ved.cfg.git_untracked_color
+			} else if s.starts_with('@@') {
+				ved.cfg.git_modified_color
+			} else {
+				ved.cfg.text_color
+			}
+			ved.gg.draw_text(line_x, y, s, gg.TextCfg{
+				...ved.cfg.txt_cfg
+				color: color
+			})
+		} else if view.hl_on {
 			// Handle multi page /**/
 			// Find the position of start and end comment delimiters on the current line.
 			// This now uses the string-based delimiters from the Mcomment struct.
@@ -318,6 +338,30 @@ fn (mut ved Ved) draw_split(i int, split_from int) {
 	}
 }
 
+// draw_selection paints the selection background of a split, line by line.
+fn (ved &Ved) draw_selection(view &View, line_x int) {
+	y1, x1, y2, x2 := view.sel_bounds()
+	top := if y1 > view.from { y1 } else { view.from }
+	bot := if y2 < view.from + ved.page_height - 1 { y2 } else { view.from + ved.page_height - 1 }
+	cw := ved.cfg.char_width
+	for j := top; j <= bot && j < view.lines.len; j++ {
+		line := view.lines[j]
+		start := if j == y1 { visual_col(line, x1, ved.cfg.tab_size) } else { 0 }
+		// lines fully inside the selection get one extra column for the newline
+		end := if j == y2 {
+			visual_col(line, x2, ved.cfg.tab_size)
+		} else {
+			visual_col(line, line.len, ved.cfg.tab_size) + 1
+		}
+		if end <= start {
+			continue
+		}
+		y := ved.text_top() + (j - view.from) * ved.cfg.line_height
+		ved.gg.draw_rect_filled(line_x + start * cw, y, (end - start) * cw, ved.cfg.line_height,
+			ved.cfg.sel_color)
+	}
+}
+
 fn (ved &Ved) max_chars(view_idx int, nr_tabs int) int {
 	width := ved.split_width() - ved.views[view_idx].padding_left - ved.cfg.char_width * ved.cfg.tab_size * nr_tabs
 	return width / ved.cfg.char_width - 1
@@ -330,47 +374,21 @@ fn (ved &Ved) draw_cursor(cursor_x int, y int) {
 		.block {
 			width = ved.cfg.char_width
 		}
-		.beam {
-			width = 1
-		}
-		.variable {
-			if ved.mode == .insert {
-				width = 1
-			} else if ved.mode == .visual {
-				// FIXME: This looks terrible.
-				// ved.gg.draw_rect_filled(cursor_x, y, 1, ved.cfg.line_height, ved.cfg.cursor_color)
-				// ved.gg.draw_rect_filled(cursor_x + ved.cfg.char_width, y, 1, ved.cfg.line_height, ved.cfg.cursor_color)
-			} else {
-				width = ved.cfg.char_width
-			}
+		.beam, .variable {
+			// there are no modes anymore, so variable is just a beam
+			ved.gg.draw_rect_filled(cursor_x, y, 2, ved.cfg.line_height, ved.cfg.cursor_color)
+			return
 		}
 	}
 	ved.gg.draw_rect_empty(cursor_x, y, width, ved.cfg.line_height, ved.cfg.cursor_color)
 }
 
 fn (ved &Ved) calc_cursor_x() int {
-	line := ved.view.line()
-	// Tab offset for cursor
-	mut cursor_tab_off := 0
-	for i := 0; i < line.len && i < ved.view.x; i++ {
-		// if rune != '\t' {
-		if int(line[i]) != ved.cfg.tab {
-			break
-		}
-		cursor_tab_off++
-	}
 	from := ved.workspace_idx * ved.nr_splits
-	split_width := ved.split_width()
-	line_x := split_width * (ved.cur_split - from) + ved.view.padding_left + 10
-	mut cursor_x := line_x + (ved.view.x + cursor_tab_off * ved.cfg.tab_size) * ved.cfg.char_width
-	if cursor_tab_off > 0 {
-		// If there's a tab, need to shift the cursor to the left by   nr of tabsl
-		cursor_x -= ved.cfg.char_width * cursor_tab_off
-	}
-	return cursor_x
+	line_x := ved.split_x(ved.cur_split - from) + ved.view.padding_left + 10
+	return line_x + visual_col(ved.view.line(), ved.view.x, ved.cfg.tab_size) * ved.cfg.char_width
 }
 
 fn (ved &Ved) calc_cursor_y() int {
-	y := (ved.view.y - ved.view.from) * ved.cfg.line_height + ved.cfg.line_height
-	return y
+	return ved.text_top() + (ved.view.y - ved.view.from) * ved.cfg.line_height
 }

@@ -5,7 +5,6 @@ module main
 
 import os
 import strings
-import gg
 
 // View represents a single editor pane or "view", holding the state for an open file buffer.
 // This includes the file path, content (lines), cursor position (x, y),
@@ -22,9 +21,16 @@ mut:
 	prev_path    string // for tt
 	lines        []string
 	page_height  int
-	vstart       int
-	vend         int // visual borders
-	vx           int // for cmd+v visual block mode
+	sel_x        int // selection anchor, the other end of the selection is the cursor
+	sel_y        int = -1 // -1 means nothing is selected
+	want_col     int = -1 // visual column kept while moving up and down through shorter lines
+	undo_stack   []UndoState
+	redo_stack   []UndoState
+	last_edit    EditKind
+	edit_seq     int // bumped on every change, the git gutter recomputes when it moves
+	git_req_seq  int = -1 // edit_seq the last gutter job was started for
+	last_edit_ms i64
+	git_marks    map[int]u8 // line => `a`dded, `m`odified, `d`eleted, compared to HEAD
 	changed      bool
 	error_y      int
 	ved          &Ved = unsafe { nil }
@@ -44,8 +50,9 @@ fn (ved &Ved) new_view() View {
 		x:            0
 		prev_x:       0
 		page_height:  ved.page_height
-		vstart:       -1
-		vend:         -1
+		sel_y:        -1
+		want_col:     -1
+		git_req_seq:  -1
 		ved:          ved
 		error_y:      -1
 		prev_y:       -1
@@ -86,9 +93,19 @@ fn (mut view View) open_file(path string, line_nr int) {
 	if path == '' {
 		return
 	}
-	lines := load_lines(path) or {
-		view.ved.error_line = 'cannot open ${path}: ${err.msg()}'
-		return
+	// Switching away from a file with unsaved edits keeps them in memory, like IDE tabs do
+	if path != view.path && view.path != '' && view.changed {
+		view.ved.stash_view(view)
+	}
+	stashed := view.ved.stash[path] or { Buffer{} }
+	from_stash := path in view.ved.stash
+	lines := if from_stash {
+		stashed.lines
+	} else {
+		load_lines(path) or {
+			view.ved.error_line = 'cannot open ${path}: ${err.msg()}'
+			return
+		}
 	}
 	// This path is in current workspace? Trim it. /code/v/file.v => file.v
 	if path.starts_with(view.ved.workspace + '/') {
@@ -109,11 +126,11 @@ fn (mut view View) open_file(path string, line_nr int) {
 	// Track file open count for ctrl+p prioritization
 	ved.file_open_count[path] = ved.file_open_count[path] + 1
 	// if os.exists(view.short_path) &&
-	if view.short_path !in ['out', ''] && view.short_path !in ved.open_paths[ved.workspace_idx] {
+	if view.short_path !in ['out', ''] && path !in ved.open_paths[ved.workspace_idx] {
 		if ved.open_paths[ved.workspace_idx].len == 0 {
 			ved.open_paths[ved.workspace_idx] = []string{cap: ved.nr_splits}
 		}
-		ved.open_paths[ved.workspace_idx] << view.short_path
+		ved.open_paths[ved.workspace_idx] << path
 	}
 	if path != view.path {
 		// Save cursor pos (Y)
@@ -149,6 +166,11 @@ fn (mut view View) open_file(path string, line_nr int) {
 		view.x = 0
 		view.y = 0
 		view.from = 0
+		view.sel_y = -1
+		view.want_col = -1
+		view.undo_stack = []
+		view.redo_stack = []
+		view.last_edit = .none
 	}
 	view.path = path
 	// view.short_path = path.replace(view.ved.workspace, '')
@@ -157,6 +179,10 @@ fn (mut view View) open_file(path string, line_nr int) {
 	s := '${nr_lines}'
 	view.padding_left = s.len * ved.cfg.char_width + 8
 	view.ved.save_session()
+	view.edit_seq++
+	if switched {
+		view.git_marks = map[int]u8{}
+	}
 	// Go to old y for this file
 	mut y := view.ved.file_y_pos[view.path]
 	// The file may have shrunk since the position was saved.
@@ -178,13 +204,22 @@ fn (mut view View) open_file(path string, line_nr int) {
 		view.move_to_line(line_nr)
 	}
 
-	view.l()
-	view.h() // so that cursor pos is correct and doesn't point to no longer existing text
+	view.clamp_cursor() // so that cursor pos doesn't point to no longer existing text
 
 	view.hash_comment = !view.path.ends_with('.v')
 	view.hl_on = !view.path.ends_with('.md') && !view.path.ends_with('.txt')
 		&& view.path.contains('.')
 	view.changed = false
+	if from_stash {
+		view.ved.stash.delete(path)
+		view.x = stashed.x
+		view.y = stashed.y
+		view.from = stashed.from
+		view.undo_stack = stashed.undo_stack
+		view.redo_stack = stashed.redo_stack
+		view.changed = true
+		view.clamp_cursor()
+	}
 	view.ved.gg.refresh_ui()
 	// go view.ved.write_changes_in_file_every_5s()
 }
@@ -215,7 +250,8 @@ fn (mut view View) save_file() {
 		view.ved.error_line = 'cannot save ${path}: ${err.msg()}'
 		return
 	}
-	spawn view.format_file()
+	spawn view.format_file(path)
+	view.ved.refresh_git()
 	// If another split has the same file open, update it
 	for mut v in view.ved.views {
 		if v.path == view.path {
@@ -226,12 +262,11 @@ fn (mut view View) save_file() {
 
 // format_file asynchronously runs an external formatting command (like `v fmt`, `goimports`, `prettier`)
 // on the view's file. After formatting, it reloads the file to reflect the changes.
-fn (mut view View) format_file() {
+fn (mut view View) format_file(path string) {
 	view.ved.load_config2()
 	if view.ved.cfg.disable_fmt {
 		return
 	}
-	path := view.path
 	// Run formatters
 	fmt_cmd := view.ved.syntaxes[view.ved.current_syntax_idx].fmt_cmd.fields().map(it.replace('<PATH>',
 		path))
@@ -248,6 +283,10 @@ fn (mut view View) format_file() {
 		os.system_args(['prettier', '--use-tabs', '-w', path])
 	} else if fmt_cmd.len > 0 {
 		os.system_args(fmt_cmd)
+	}
+	// The view may show another file by now (tab switched right after saving)
+	if view.path != path {
+		return
 	}
 	view.reopen()
 	// update git diff
@@ -303,88 +342,7 @@ fn (mut view View) set_y(new_y int) {
 	view.ved.update_cur_fn_name()
 }
 
-// j moves the cursor down one line, handling scrolling and maintaining horizontal position. (Vim: `j`)
-fn (mut view View) j() {
-	if view.lines.len == 0 {
-		return
-	}
-	line0 := view.line()
-	view.set_y(view.y + 1)
-	// Reached end
-	if view.y >= view.lines.len {
-		view.set_y(view.lines.len - 1)
-		return
-	}
-	// Scroll
-	if view.y >= view.from + view.page_height {
-		view.from++
-	}
-	// Correct x if there are tabs on the next line
-	_, nr_tabs1 := nr_spaces_and_tabs_in_line(line0)
-	line := view.line()
-	_, nr_tabs2 := nr_spaces_and_tabs_in_line(line)
-	// println('tabs1,2=${nr_tabs1},${nr_tabs2}')
-	// println(view.ved.cfg.tab_size)
-	if nr_tabs2 > nr_tabs1 {
-		view.x -= (nr_tabs2 - nr_tabs1) * view.ved.cfg.tab_size - 1
-	}
-	// Line below is shorter, move to the end of it
-	if view.x > line.len - 1 {
-		view.prev_x = view.x
-		view.x = line.len - 1
-	}
-	if view.x < 0 {
-		view.x = 0
-	}
-}
-
-// k moves the cursor up one line, handling scrolling and maintaining horizontal position. (Vim: `k`)
-fn (mut view View) k() {
-	if view.y >= view.lines.len {
-		view.y = view.lines.len - 1
-	}
-	if view.y <= 0 {
-		return
-	}
-	line0 := view.line()
-	view.set_y(view.y - 1)
-	// Scroll
-	if view.y < view.from && view.y >= 0 {
-		view.from--
-	}
-	// Correct x if there are tabs on the prev line
-	_, nr_tabs1 := nr_spaces_and_tabs_in_line(line0)
-	line := view.line()
-	_, nr_tabs2 := nr_spaces_and_tabs_in_line(line)
-	// println('tabs1,2=${nr_tabs1},${nr_tabs2}')
-	// println(view.ved.cfg.tab_size)
-	if nr_tabs2 < nr_tabs1 {
-		view.x -= (nr_tabs1 - nr_tabs2) * view.ved.cfg.tab_size - 1
-		if view.x < 0 {
-			view.x = 0
-		}
-	}
-	// Line above is shorter, move to the end of it
-	if view.x > line.len - 1 {
-		view.prev_x = view.x
-		view.x = line.len - 1
-		if view.x < 0 {
-			view.x = 0
-		}
-	}
-}
-
-// shift_h moves the cursor to the first visible line on the screen (the top of the current page). (Vim: `H`)
-fn (mut view View) shift_h() {
-	view.set_y(view.from)
-}
-
-// move_to_page_bot moves the cursor to the last visible line on the screen (the bottom of the current page). (Vim: `L`)
-fn (mut view View) move_to_page_bot() {
-	view.set_y(view.from + view.page_height - 1)
-}
-
-// l moves the cursor one character to the right. (Vim: `l`)
+// l moves the cursor one character to the right.
 fn (mut view View) l() {
 	line := view.line()
 	if view.x < line.len {
@@ -392,7 +350,7 @@ fn (mut view View) l() {
 	}
 }
 
-// h moves the cursor one character to the left. (Vim: `h`)
+// h moves the cursor one character to the left.
 fn (mut view View) h() {
 	if view.x > 0 {
 		view.x--
@@ -404,7 +362,7 @@ fn (mut view View) h() {
 	}
 }
 
-// shift_g moves the cursor to the last line of the file. (Vim: `G`)
+// shift_g moves the cursor to the last line of the file (Ctrl+End).
 fn (mut view View) shift_g() {
 	view.set_y(view.lines.len - 1)
 	view.from = view.y - view.page_height + 1
@@ -413,28 +371,13 @@ fn (mut view View) shift_g() {
 	}
 }
 
-// shift_a appends a space at the end of the current line. (Similar to Vim: `A`)
-fn (mut view View) shift_a() {
-	line := view.line()
-	view.set_line('${line} ')
-	view.x = view.uline().len - 1
-}
-
-// shift_i moves the cursor to the first non-whitespace character of the current line. (Vim: `^` or `I`)
-fn (mut view View) shift_i() {
-	view.x = 0
-	for view.char() == view.ved.cfg.tab {
-		view.x++
-	}
-}
-
-// gg moves the cursor to the first line of the file. (Vim: `gg`)
+// gg moves the cursor to the first line of the file (Ctrl+Home).
 fn (mut view View) gg() {
 	view.from = 0
 	view.set_y(0)
 }
 
-// shift_f scrolls the view down by one page. (Vim: `Ctrl+F`)
+// shift_f scrolls the view down by one page (Page Down).
 fn (mut view View) shift_f() {
 	view.from += view.page_height
 	if view.from >= view.lines.len {
@@ -443,7 +386,7 @@ fn (mut view View) shift_f() {
 	view.set_y(view.from)
 }
 
-// shift_b scrolls the view up by one page. (Vim: `Ctrl+B`)
+// shift_b scrolls the view up by one page (Page Up).
 fn (mut view View) shift_b() {
 	view.from -= view.page_height
 	if view.from < 0 {
@@ -452,56 +395,57 @@ fn (mut view View) shift_b() {
 	view.set_y(view.from)
 }
 
-// dd deletes the current line and copies it to the yank buffer. (Vim: `dd`)
+// dd deletes the current line (Ctrl+Y).
 fn (mut view View) dd() {
 	if view.lines.len == 0 {
 		return
 	}
-	mut ved := view.ved
-	ved.prev_key = gg.KeyCode.invalid
-	ved.prev_cmd = 'dd'
-	ved.ylines = []
-	ved.ylines << view.line()
-	view.lines.delete(view.y)
-	if view.y == view.lines.len {
-		view.k()
+	if view.lines.len == 1 {
+		// never leave the buffer without lines, the rest of the code assumes there's one
+		view.lines[0] = ''
+	} else {
+		view.lines.delete(view.y)
+	}
+	if view.y >= view.lines.len {
+		view.y = view.lines.len - 1
+	}
+	view.clamp_cursor()
+	view.changed = true
+}
+
+// shift_right indents the current line or the selected lines by one level (Tab).
+fn (mut view View) shift_right() {
+	top, bot := view.sel_line_range()
+	for i := top; i <= bot; i++ {
+		view.lines[i] = '\t${view.lines[i]}'
+	}
+	view.x++
+	if view.has_sel() {
+		view.sel_x++
 	}
 	view.changed = true
 }
 
-// shift_right indents the current line or the visually selected lines by one level. (Vim: `>`)
-fn (mut view View) shift_right() {
-	// No selection, shift current line
-	if view.vstart == -1 {
-		view.set_line('\t${view.line()}')
-		return
-	}
-	for i := view.vstart; i <= view.vend; i++ {
-		line := view.lines[i]
-		view.lines[i] = '\t${line}'
-	}
-}
-
-// shift_left un-indents the current line or the visually selected lines by one level. (Vim: `<`)
+// shift_left un-indents the current line or the selected lines by one level (Shift+Tab).
 fn (mut view View) shift_left() {
-	if view.vstart == -1 {
-		line := view.line()
-		if !line.starts_with('\t') {
-			return
-		}
-		view.set_line(line[1..])
-		return
-	}
-	for i := view.vstart; i <= view.vend; i++ {
+	top, bot := view.sel_line_range()
+	for i := top; i <= bot; i++ {
 		line := view.lines[i]
 		if !line.starts_with('\t') {
 			continue
 		}
 		view.lines[i] = line[1..]
+		if i == view.y && view.x > 0 {
+			view.x--
+		}
+		if i == view.sel_y && view.sel_x > 0 {
+			view.sel_x--
+		}
+		view.changed = true
 	}
 }
 
-// delete_char deletes the character currently under the cursor. (Vim: `x`)
+// delete_char deletes the character right after the cursor (Delete).
 fn (mut v View) delete_char() {
 	u := v.uline()
 	if u.len < 1 || v.x >= u.len {
@@ -511,26 +455,13 @@ fn (mut v View) delete_char() {
 	right := u[v.x + 1..]
 	new_line << right
 	v.set_line(new_line.string())
-	if v.x >= new_line.len {
-		v.x = new_line.len - 1
-	}
-}
-
-// shift_c deletes from the cursor to the end of the line and returns the deleted text. (Similar to Vim: `C`)
-fn (mut view View) shift_c() string {
-	line := view.line()
-	s := line[..view.x]
-	deleted := line[view.x..]
-	view.set_line('${s} ')
-	view.x = s.len
-	return deleted
 }
 
 // insert_text inserts the given string `s` at the current cursor position.
 fn (mut view View) insert_text(s string) {
 	line := view.line()
 	if line.len == 0 {
-		view.set_line('${s} ')
+		view.set_line(s)
 	} else {
 		if view.x > line.len {
 			view.x = line.len
@@ -557,13 +488,14 @@ fn (mut view View) insert_text(s string) {
 	}
 }
 
-// backspace handles a backspace key press, deleting the character before the cursor or joining lines if at the beginning of a line.
+// backspace deletes the character before the cursor, or joins the line with
+// the previous one when the cursor is at the start of it.
 fn (mut view View) backspace() {
 	if view.x == 0 {
-		if view.ved.cfg.backspace_go_up && view.y > 0 {
-			view.x = 0
+		if view.y > 0 {
 			view.y--
-			view.x = view.lines[view.y].len
+			view.x = view.uline().len
+			view.lines[view.y] += view.lines[view.y + 1]
 			view.lines.delete(view.y + 1)
 			view.changed = true
 		}
@@ -579,57 +511,28 @@ fn (mut view View) backspace() {
 	}
 	view.set_line('${left}${right}')
 	view.x--
-	if view.ved.prev_insert.len > 0 {
-		view.ved.prev_insert = view.ved.prev_insert[..view.ved.prev_insert.len - 1] // TODO runes
-	}
 }
 
-// yy yanks (copies) the current line into the yank buffer. (Vim: `yy`)
-fn (mut view View) yy() {
-	view.ved.ylines = [view.line()]
-}
-
-// p pastes the content of the yank buffer on new lines below the current cursor position. (Vim: `p`)
-fn (mut view View) p() {
-	for line in view.ved.ylines {
-		view.o()
-		view.set_line(line)
-	}
-}
-
-// shift_o opens a new, indented line above the current line. (Vim: `O`)
+// shift_o opens a new, indented line above the current line (Ctrl+Alt+Enter).
 fn (mut view View) shift_o() {
 	view.o_generic(0)
 }
 
-// o opens a new, indented line below the current line. (Vim: `o`)
+// o opens a new, indented line below the current line (Shift+Enter).
 fn (mut view View) o() {
 	view.o_generic(1)
 }
 
 fn (mut view View) o_generic(delta int) {
+	// Take the indentation from the line the cursor was on
+	prev_line := view.line()
 	view.y += delta
-	// Insert the same amount of spaces/tabs as in prev line
-	prev_line := if view.lines.len == 0 || view.y == 0 {
-		''
-	} else {
-		// Ensure index is valid before accessing
-		prev_idx := view.y - 1
-		if prev_idx >= 0 && prev_idx < view.lines.len { // Added check
-			view.lines[prev_idx]
-		} else {
-			// This case shouldn't happen based on the logic, but handle defensively
-			'' // Default to no indentation if index is bad
-		}
-	}
 	nr_spaces, nr_tabs := nr_spaces_and_tabs_in_line(prev_line)
 	mut new_line := strings.repeat(`\t`, nr_tabs) + strings.repeat(` `, nr_spaces)
-	if prev_line.ends_with('{') || prev_line.ends_with('{ ') {
-		new_line += '\t '
-	} else if !new_line.ends_with(' ') {
-		new_line += ' '
+	if delta == 1 && prev_line.trim_right(' ').ends_with('{') {
+		new_line += '\t'
 	}
-	view.x = new_line.len - 1
+	view.x = new_line.len
 	if view.y >= view.lines.len {
 		view.lines << new_line
 	} else {
@@ -638,164 +541,50 @@ fn (mut view View) o_generic(delta int) {
 	view.changed = true
 }
 
-// enter handles an enter key press in insert mode, splitting the current line at the cursor position.
+// enter splits the current line at the cursor. The new line keeps the indentation,
+// gets one more level after an opening bracket, and `{|}` turns into three lines.
 fn (mut view View) enter() {
-	// Create new line
-	// And move everything to the right of the cursor to it
-	pos := view.x
-	line := view.line()
-	if pos >= line.len - 1 && line != '' && line != ' ' {
-		// {} insertion
-		if line.ends_with('{ ') {
-			view.o()
-			view.x--
-			view.insert_text('}')
-			view.y--
-			view.o()
-			// view.insert_text('\t')
-			// view.x = 0
-		} else {
-			view.o()
-		}
-		return
-	}
-	// if line == '' {
-	// view.o()
-	// return
-	// }
-	uline := line.runes()
-	mut right := ''
-	if pos < uline.len {
-		right = uline[pos..].string()
-	}
+	uline := view.uline()
+	pos := if view.x > uline.len { uline.len } else { view.x }
 	left := uline[..pos].string()
+	right := uline[pos..].string().trim_left(' \t')
+	nr_spaces, nr_tabs := nr_spaces_and_tabs_in_line(left)
+	indent := strings.repeat(`\t`, nr_tabs) + strings.repeat(` `, nr_spaces)
+	trimmed := left.trim_right(' \t')
+	opens := trimmed.len > 0 && trimmed[trimmed.len - 1] in [`{`, `(`, `[`]
+	inner := if opens { indent + '\t' } else { indent }
 	view.set_line(left)
-	view.o()
-	view.set_line(right)
-	view.x = 0
+	if opens && right.len > 0 && right[0] in [`}`, `)`, `]`] {
+		view.lines.insert(view.y + 1, inner)
+		view.lines.insert(view.y + 2, indent + right)
+	} else {
+		view.lines.insert(view.y + 1, inner + right)
+	}
+	view.set_y(view.y + 1)
+	view.x = inner.runes().len
+	view.changed = true
 }
 
-// join joins the current line with the line below it. (Vim: `J`)
+// join joins the current line with the line below it (Ctrl+Shift+J).
 fn (mut view View) join() {
-	if view.y == view.lines.len - 1 {
+	if view.y >= view.lines.len - 1 {
 		return
 	}
-	// Add next line to current line
-	line := view.line()
-	second_line := view.lines[view.y + 1]
-	joined := line + second_line
-	view.set_line(joined)
-	view.y++
-	view.dd()
-	view.y--
-	// view.prev_cmd = "J"
-}
-
-// y_visual yanks (copies) the visually selected lines into the yank buffer.
-fn (mut v View) y_visual() {
-	mut ylines := []string{}
-	vtop, vbot := if v.vstart < v.vend { v.vstart, v.vend } else { v.vend, v.vstart }
-	for i := vtop; i <= vbot; i++ {
-		ylines << v.lines[i]
-	}
-	mut ved := v.ved
-	ved.ylines = ylines
-	// Copy YY to clipboard if +(=) was pressed before
-	if ved.prev_key == .equal {
-		ved.cb.copy(ylines.join('\n'))
-	}
-	v.vstart = -1
-	v.vend = -1
-}
-
-// d_visual deletes the visually selected lines and copies them to the yank buffer.
-fn (mut view View) d_visual() {
-	vtop := if view.vstart < view.vend { view.vstart } else { view.vend }
-	view.y_visual()
-	for i := 0; i < view.ved.ylines.len; i++ {
-		view.lines.delete(vtop)
-	}
-	// Move cursor to a valid position using k
-	if view.y >= view.lines.len {
-		view.y = view.lines.len
+	line := view.line().trim_right(' \t')
+	second_line := view.lines[view.y + 1].trim_left(' \t')
+	view.x = line.runes().len
+	if line.len > 0 && second_line.len > 0 {
+		view.set_line('${line} ${second_line}')
+		view.x++
 	} else {
-		view.y += 1
+		view.set_line(line + second_line)
 	}
-	view.k()
-}
-
-fn (mut view View) d_visual_block() {
-	vtop, vbot := if view.vstart < view.vend {
-		view.vstart, view.vend
-	} else {
-		view.vend, view.vstart
-	}
-	xtop, xbot := if view.vx < view.x { view.vx, view.x } else { view.x, view.vx }
-	for i := vtop; i <= vbot; i++ {
-		if i >= view.lines.len {
-			continue
-		}
-		line := view.lines[i]
-		runes := line.runes()
-		if xtop >= runes.len {
-			continue
-		}
-		end := if xbot + 1 > runes.len { runes.len } else { xbot + 1 }
-		left := runes[..xtop]
-		right := runes[end..]
-		view.lines[i] = left.string() + right.string()
-	}
-	view.changed = true
-	view.ved.exit_visual()
-	view.x = xtop
-}
-
-// cw changes the word under the cursor: deletes it and enters insert mode. (Vim: `cw`)
-fn (mut view View) cw() {
-	mut ved := view.ved
-	ved.prev_insert = ''
-	view.dw(false)
-	ved.prev_cmd = 'cw'
-	// view.ved.set_insert() // don't call this since it resets prev_insert
-	ved.mode = .insert
-	ved.just_switched = true
+	view.lines.delete(view.y + 1)
 }
 
 // returns the removed word
-// dw deletes the word under the cursor. If `del_whitespace` is true, trailing whitespace is also deleted. (Vim: `dw`)
-fn (mut view View) dw(del_whitespace bool) { // string {
-	mut ved := view.ved
-	typ := is_alpha(u8(view.char()))
-	// While cur char has the same type - delete it
-	for {
-		line := view.line()
-		if view.x < 0 || view.x >= line.len - 1 {
-			break
-		}
-		if typ == is_alpha(u8(view.char())) {
-			// println('del x=$view.x len=$line.len')
-			view.delete_char()
-		} else {
-			break
-		}
-	}
-	// Delete whitespace after the deleted word
-	if del_whitespace {
-		for is_whitespace(u8(view.char())) {
-			line := view.line()
-			if view.x < 0 || view.x >= line.len {
-				break
-			}
-			view.delete_char()
-		}
-	}
-	ved.prev_cmd = 'dw'
-}
-
-// returns the removed word
-// db deletes the word backwards from the cursor position. (Vim: `db`)
+// db deletes the word backwards from the cursor position.
 fn (mut view View) db(del_whitespace bool) { // string {
-	mut ved := view.ved
 	typ := is_alpha(u8(view.char()))
 	// While cur char has the same type - delete it
 	for {
@@ -824,120 +613,9 @@ fn (mut view View) db(del_whitespace bool) { // string {
 		}
 	}
 	*/
-	ved.prev_cmd = 'db'
 }
 
-// dt deletes from the cursor up to (but not including) the character `s` on the current line. (Vim: `dt`)
-fn (mut view View) dt(s string) {
-	if s == '' {
-		return
-	}
-	line := view.line()
-	runes := line.runes()
-	if view.x >= runes.len {
-		return
-	}
-	target := s.runes()[0]
-	for i := view.x; i < runes.len; i++ {
-		if runes[i] == target {
-			mut new_runes := []rune{}
-			new_runes << runes[..view.x]
-			new_runes << runes[i..]
-			view.set_line(new_runes.string())
-			view.changed = true
-			break
-		}
-	}
-}
-
-// TODO COPY PASTA
-// same as cw but deletes underscores
-// ce changes the word/token under the cursor. Similar to `cw` but may use a different definition of a "word".
-fn (mut view View) ce() {
-	mut ved := view.ved
-	view.de()
-	ved.prev_cmd = 'ce'
-	view.ved.set_insert()
-}
-
-// w moves the cursor forward to the beginning of the next word. (Vim: `w`)
-fn (mut view View) w() {
-	line := view.line()
-	typ := is_alpha_underscore(view.char())
-	// Go to end of current word
-	for view.x < line.len - 1 && typ == is_alpha_underscore(view.char()) {
-		view.x++
-	}
-	// Go to start of next word
-	for view.x < line.len - 1 && view.char() == 32 {
-		view.x++
-	}
-}
-
-// b moves the cursor backward to the beginning of the previous word. (Vim: `b`)
-fn (mut view View) b() {
-	// line := view.line()
-	// Go to start of prev word
-	for view.x > 0 && view.char() == 32 {
-		view.x--
-	}
-	typ := is_alpha_underscore(view.char())
-	// Go to start of current word
-	for view.x > 0 && typ == is_alpha_underscore(view.char()) {
-		view.x--
-	}
-}
-
-// de deletes from the cursor to the end of the current word/token. (Vim: `de`)
-fn (mut view View) de() {
-	mut ved := view.ved
-	typ := is_alpha_underscore(view.char())
-	// While cur char has the same type - delete it
-	for {
-		line := view.line()
-		if view.x >= 0 && view.x < line.len && typ == is_alpha_underscore(view.char()) {
-			view.delete_char()
-		} else {
-			break
-		}
-	}
-	ved.prev_cmd = 'de'
-}
-
-// delete all characters before and after the cursor inside '', "", () etc
-// ci "Change inside". Deletes the text within a surrounding delimiter (like quotes or parentheses)
-// based on the `key` pressed, and enters insert mode. (Vim: `ci'`)
-fn (mut view View) ci(key gg.KeyCode) {
-	mut ved := view.ved
-	line := view.line()
-	defer {
-		ved.prev_cmd = ''
-	}
-	match key {
-		.apostrophe {
-			if !line.contains("'") {
-				return
-			}
-			mut start := view.x
-			for line[start] != `'` {
-				start--
-			}
-			mut end := view.x
-			for line[end] != `'` {
-				end++
-			}
-			view.set_line(line[..start + 1] + line[end..])
-			view.x = start + 1
-			view.ved.set_insert()
-		}
-		._9 {}
-		else {}
-	}
-	// match
-	// view.dw()
-}
-
-// zz centers the current line vertically on the screen. (Vim: `zz`)
+// zz centers the current line vertically on the screen.
 fn (mut view View) zz() {
 	view.from = view.y - view.ved.page_height / 2
 	if view.from < 0 {
@@ -945,20 +623,11 @@ fn (mut view View) zz() {
 	}
 }
 
-// r replaces the single character under the cursor with the character(s) in `s`. (Vim: `r`)
-fn (mut view View) r(s string) {
-	view.delete_char()
-	view.insert_text(s)
-	view.x--
-}
-
-// tt toggles to the previously active view/file.
+// tt toggles to the previously active file (Ctrl+E).
 fn (mut view View) tt() {
 	if view.prev_path == '' {
 		return
 	}
-	mut ved := view.ved
-	ved.prev_key = .invalid
 	view.open_file(view.prev_path, 0)
 }
 
@@ -968,27 +637,6 @@ fn (mut view View) move_to_line(line int) {
 	view.from = line
 	view.set_y(line)
 	view.zz()
-}
-
-// ctrl+a - increase number by one
-// super_a finds the first number on the current line and increases it by `diff`. (Vim: `Ctrl+A` for +1)
-fn (mut view View) super_a(diff int) {
-	line := view.line()
-	mut num_start_pos := -1
-	for i, r in line {
-		if r >= `0` && r <= `9` {
-			num_start_pos = i
-			break
-		}
-	}
-	if num_start_pos == -1 {
-		return
-	}
-	s := line[num_start_pos..]
-	vals := s.fields()
-	number := vals[0].int()
-	new_line := line.replace_once(number.str(), (number + diff).str())
-	view.set_line(new_line)
 }
 
 // is_alpha checks if a byte represents an alphanumeric character (`a-z`, `A-Z`, `0-9`).

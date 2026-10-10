@@ -20,45 +20,56 @@ enum CursorStyle {
 struct Config {
 mut:
 	// settings        toml.Doc
-	dark_mode       bool
-	cursor_style    CursorStyle
-	text_size       int = min_text_size
-	line_height     int = 20
-	char_width      int = 8
-	tab_size        int = 4
-	tab             int = int(`\t`) // TODO read from config file?
-	backspace_go_up bool
-	vcolor          gg.Color // v selection background color
-	split_color     gg.Color
-	bgcolor         gg.Color // base00
-	popup_bgcolor   gg.Color // autocomplete and query window background
-	errorbgcolor    gg.Color // base08
-	title_color     gg.Color // base04
-	cursor_color    gg.Color // base05
-	string_color    gg.Color // base0B
-	string_cfg      gg.TextCfg
-	key_color       gg.Color // base0E
-	key_cfg         gg.TextCfg
-	lit_color       gg.Color // base0E
-	lit_cfg         gg.TextCfg
-	text_color      gg.Color // base05
-	txt_cfg         gg.TextCfg
-	comment_color   gg.Color // base03
-	comment_cfg     gg.TextCfg
-	file_name_color gg.Color
-	file_name_cfg   gg.TextCfg
-	plus_color      gg.Color
-	plus_cfg        gg.TextCfg
-	minus_color     gg.Color
-	minus_cfg       gg.TextCfg
-	line_nr_color   gg.Color // base01
-	line_nr_cfg     gg.TextCfg
-	green_color     gg.Color // base0B
-	green_cfg       gg.TextCfg
-	red_color       gg.Color // base08
-	red_cfg         gg.TextCfg
-	disable_mouse   bool = true
-	show_file_tree  bool
+	dark_mode           bool
+	cursor_style        CursorStyle
+	text_size           int = min_text_size
+	line_height         int = 20
+	char_width          int = 8
+	tab_size            int = 4
+	tab                 int = int(`\t`) // TODO read from config file?
+	backspace_go_up     bool
+	vcolor              gg.Color // current line background color
+	sel_color           gg.Color // selection background color
+	split_color         gg.Color
+	panel_color         gg.Color // file tree, tab bar and status bar background
+	toolbar_color       gg.Color // menu bar background
+	hover_color         gg.Color // menu titles and rows under the mouse
+	active_color        gg.Color // selected rows in lists and menus
+	accent_color        gg.Color // underline of the active tab, buttons
+	git_added_color     gg.Color
+	git_modified_color  gg.Color
+	git_untracked_color gg.Color
+	bgcolor             gg.Color // base00
+	popup_bgcolor       gg.Color // autocomplete and query window background
+	errorbgcolor        gg.Color // base08
+	title_color         gg.Color // base04
+	cursor_color        gg.Color // base05
+	string_color        gg.Color // base0B
+	string_cfg          gg.TextCfg
+	key_color           gg.Color // base0E
+	key_cfg             gg.TextCfg
+	lit_color           gg.Color // base0E
+	lit_cfg             gg.TextCfg
+	text_color          gg.Color // base05
+	txt_cfg             gg.TextCfg
+	comment_color       gg.Color // base03
+	comment_cfg         gg.TextCfg
+	file_name_color     gg.Color
+	file_name_cfg       gg.TextCfg
+	plus_color          gg.Color
+	plus_cfg            gg.TextCfg
+	minus_color         gg.Color
+	minus_cfg           gg.TextCfg
+	line_nr_color       gg.Color // base01
+	line_nr_cfg         gg.TextCfg
+	dim_cfg             gg.TextCfg // like line_nr_cfg, but left aligned
+	green_color         gg.Color   // base0B
+	green_cfg           gg.TextCfg
+	red_color           gg.Color // base08
+	red_cfg             gg.TextCfg
+	disable_mouse       bool
+	show_file_tree      bool = true
+	tree_width          int  = 240
 	// Config.json
 	disable_fmt bool
 	atomic_save bool // save through a temporary file that replaces the original
@@ -94,6 +105,7 @@ fn (mut config Config) set_default_values() {
 	// config.set_disable_mouse()
 	config.set_vcolor()
 	config.set_split()
+	config.set_panel()
 	config.set_bgcolor()
 	config.set_popup_bgcolor()
 	config.set_errorbgcolor()
@@ -129,7 +141,7 @@ fn (mut config Config) set_cursor_style() {
 		return
 	}
 	*/
-	config.cursor_style = .block
+	config.cursor_style = .beam
 }
 
 // Convert a toml key color (in hex) to a gx.Color type
@@ -151,10 +163,33 @@ fn (config Config) get_toml_color(base string) !gx.Color {
 
 fn (mut config Config) set_vcolor() {
 	if !config.dark_mode {
-		config.vcolor = gg.rgb(226, 233, 241)
+		config.vcolor = gg.rgb(236, 240, 245)
+		config.sel_color = gg.rgb(166, 210, 255)
 	} else {
-		config.vcolor = gg.rgb(60, 60, 60)
+		config.vcolor = gg.rgb(40, 40, 40)
+		config.sel_color = gg.rgb(33, 66, 131)
 	}
+}
+
+fn (mut config Config) set_panel() {
+	if !config.dark_mode {
+		config.panel_color = gg.rgb(235, 235, 235)
+		config.toolbar_color = gg.rgb(247, 248, 250)
+		config.hover_color = gg.rgb(218, 220, 224)
+		config.active_color = gg.rgb(212, 226, 255)
+		config.git_added_color = gg.rgb(80, 138, 60)
+		config.git_modified_color = gg.rgb(45, 100, 200)
+		config.git_untracked_color = gg.rgb(190, 80, 60)
+	} else {
+		config.panel_color = gg.rgb(43, 45, 48)
+		config.toolbar_color = gg.rgb(43, 45, 48)
+		config.hover_color = gg.rgb(57, 59, 64)
+		config.active_color = gg.rgb(46, 67, 110)
+		config.git_added_color = gg.rgb(98, 160, 85)
+		config.git_modified_color = gg.rgb(108, 149, 235)
+		config.git_untracked_color = gg.rgb(214, 112, 96)
+	}
+	config.accent_color = gg.rgb(53, 116, 240)
 }
 
 fn (mut config Config) set_split() {
@@ -298,6 +333,10 @@ fn (mut config Config) set_line_nr() {
 		size:  config.text_size
 		color: config.line_nr_color
 		align: gg.align_right
+	}
+	config.dim_cfg = gg.TextCfg{
+		size:  config.text_size
+		color: if config.dark_mode { gg.rgb(140, 140, 140) } else { gg.rgb(110, 110, 110) }
 	}
 }
 

@@ -249,7 +249,7 @@ fn (mut ved Ved) insert_suggested_field() {
 		// break
 		//}
 	}
-	ved.mode = .insert
+	ved.mode = .edit
 }
 
 /*
