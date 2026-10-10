@@ -130,7 +130,7 @@ Usage: ved [options] [files]
 Options:
   -h, --help              Display this information.
   -fullscreen             Launch in fullscreen.
-  -dark                   Launch in dark mode.
+  -light                  Launch in light mode (dark is the default).
   -two_splits
 '
 

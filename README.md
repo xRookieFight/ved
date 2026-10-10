@@ -111,7 +111,7 @@ of the possible settings:
 # To get started, create a file called "conf.toml" in $HOME/.ved
 # Most of the settings are contained inside this "editor" table.
 [editor]
-dark_mode = false       # Ved comes with a light and dark mode built-in.
+dark_mode = true        # Ved comes with a light and dark mode built-in. Dark is the default, use -light to switch.
 cursor = 'variable'     # Ved has three variants: Variable, block, and beam. You are probably used to "variable" or "beam".
 text_size = 18          # ┌───────────────────────────────────────────────────┐
 line_height = 20        # │ These *can* be edited, but you probably shouldn't │

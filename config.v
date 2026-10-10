@@ -113,7 +113,7 @@ fn (mut config Config) set_default_values() {
 }
 
 fn (mut config Config) init_colors() {
-	config.dark_mode ||= '-dark' in os.args
+	config.dark_mode = '-light' !in os.args
 }
 
 fn (mut config Config) set_cursor_style() {
