@@ -370,7 +370,7 @@ fn (mut ved Ved) draw_query() {
 
 	x := (ved.win_width - width) / 2
 	y := (ved.win_height - height) / 2
-	ved.gg.draw_rect_filled(x, y, width, height, gg.white)
+	ved.gg.draw_rect_filled(x, y, width, height, ved.cfg.popup_bgcolor)
 	// query window title
 	ved.gg.draw_rect_filled(x, y, width, ved.cfg.line_height, ved.cfg.title_color)
 	mut title := ved.query_type.str()

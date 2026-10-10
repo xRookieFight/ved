@@ -46,7 +46,7 @@ fn (ved &Ved) draw_autocomplete_window() {
 	if ved.autocomplete_info.vars.len == 0 {
 		return
 	}
-	ved.gg.draw_rect_filled(x, y, width, height, gg.white)
+	ved.gg.draw_rect_filled(x, y, width, height, ved.cfg.popup_bgcolor)
 	// ved.gg.draw_text(x + 10, y + 30, 'AUTOCOMPLETE', txt_cfg)
 
 	// for i, var in ved.autocomplete_info.vars {
@@ -70,7 +70,7 @@ fn (ved &Ved) draw_autocomplete_window() {
 		// Draw var name + type
 		nt := '${var.name}: ${var.typ}'
 		ved.gg.draw_rect_filled(x + width, y, ved.cfg.char_width * nt.len, ved.cfg.line_height,
-			gg.white)
+			ved.cfg.popup_bgcolor)
 		ved.gg.draw_text(x + width, y, nt, gg.TextCfg{
 			...ved.cfg.txt_cfg
 			bold: true

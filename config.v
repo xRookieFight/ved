@@ -31,6 +31,7 @@ mut:
 	vcolor          gg.Color // v selection background color
 	split_color     gg.Color
 	bgcolor         gg.Color // base00
+	popup_bgcolor   gg.Color // autocomplete and query window background
 	errorbgcolor    gg.Color // base08
 	title_color     gg.Color // base04
 	cursor_color    gg.Color // base05
@@ -94,6 +95,7 @@ fn (mut config Config) set_default_values() {
 	config.set_vcolor()
 	config.set_split()
 	config.set_bgcolor()
+	config.set_popup_bgcolor()
 	config.set_errorbgcolor()
 	config.set_string()
 	config.set_key()
@@ -172,6 +174,14 @@ fn (mut config Config) set_bgcolor() {
 		gg.rgb(245, 245, 245)
 	}
 	//}
+}
+
+fn (mut config Config) set_popup_bgcolor() {
+	config.popup_bgcolor = if config.dark_mode {
+		gg.rgb(45, 45, 45)
+	} else {
+		gg.white
+	}
 }
 
 // base 01
